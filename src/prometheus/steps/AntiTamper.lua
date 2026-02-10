@@ -21,11 +21,17 @@ AntiTamper.SettingsDescriptor = {
         type = "boolean",
         default = true,
         description = "Use debug library. (Recommended, however scripts will not work without debug library.)"
+    },
+    RobloxMode = {
+        type = "boolean",
+        default = false,
+        description = "Enable Roblox compatibility mode (disables debug-based checks that are not available in Roblox)."
     }
 }
 
 function AntiTamper:init(settings)
-	
+	-- Per-build randomization seed for checks
+	self.checkSeed = math.random(1, 2^24);
 end
 
 function AntiTamper:apply(ast, pipeline)
@@ -34,7 +40,8 @@ function AntiTamper:apply(ast, pipeline)
         return ast;
     end
 	local code = "do local valid = true;";
-    if self.UseDebug then
+    -- Roblox compatibility: debug library may not be available
+    if self.UseDebug and not self.RobloxMode then
         local string = RandomStrings.randomString();
         code = code .. [[
             -- Anti Beautify

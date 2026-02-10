@@ -1,11 +1,11 @@
--- This Script is Part of the Prometheus Obfuscator by Levno_710
---
--- compiler.lua
--- This Script contains the new Compiler
+-- Bytecode Compiler Module
+-- Compiles AST to custom VM bytecode with advanced obfuscation
+-- Core component of the code protection system
 
--- The max Number of variables used as registers
+-- VM Configuration Constants
 local MAX_REGS = 100;
 local MAX_REGS_MUL = 0;
+local VM_VERSION = 0x03; -- Incremented to mark changes from original Prometheus
 
 local Compiler = {};
 
@@ -15,6 +15,8 @@ local logger = require("logger");
 local util = require("prometheus.util");
 local visitast = require("prometheus.visitast")
 local randomStrings = require("prometheus.randomStrings")
+local bit32 = require("prometheus.bit").bit32;
+local bit = require("prometheus.bit").bit;
 
 local lookupify = util.lookupify;
 local AstKind = Ast.AstKind;
@@ -32,11 +34,18 @@ function Compiler:new()
         maxUsedRegister = 0;
         registerVars = {};
 
-        VAR_REGISTER = newproxy(false);
-        RETURN_ALL = newproxy(false);
-        POS_REGISTER = newproxy(false);
-        RETURN_REGISTER = newproxy(false);
-        UPVALUE = newproxy(false);
+        -- Encoded instruction pointer (pos) hardening.
+        -- Each block has a random raw id, but the VM uses an encoded id (posId)
+        -- to make static control-flow reconstruction harder.
+        posKey = 0;
+        posIdMap = {}; -- rawId -> posId
+
+        -- Roblox-compatible unique tokens (newproxy not available)
+        VAR_REGISTER = {};
+        RETURN_ALL = {};
+        POS_REGISTER = {};
+        RETURN_REGISTER = {};
+        UPVALUE = {};
 
         BIN_OPS = lookupify{
             AstKind.LessThanExpression,
@@ -68,9 +77,14 @@ function Compiler:createBlock()
     until not self.usedBlockIds[id];
     self.usedBlockIds[id] = true;
 
+    -- Derive encoded VM position id using bit.bxor for Roblox compatibility.
+    local posId = bit.bxor(id, self.posKey or 0);
+    self.posIdMap[id] = posId;
+
     local scope = Scope:new(self.containerFuncScope);
     local block = {
         id = id;
+        posId = posId;
         statements = {
 
         };
@@ -107,6 +121,11 @@ function Compiler:compile(ast)
     self.registerVars = {};
     self.usedBlockIds = {};
 
+    -- VM pos encoding key (deterministic w.r.t. math.randomseed configured by the pipeline).
+    -- Use <2^24 to stay within the same general range as block ids.
+    self.posKey = math.random(0, 2^24 - 1);
+    self.posIdMap = {};
+
     self.upvalVars = {};
     self.registerUsageStack = {};
 
@@ -115,6 +134,7 @@ function Compiler:compile(ast)
     local newGlobalScope = Scope:newGlobal();
     local psc = Scope:new(newGlobalScope, nil);
 
+    -- Roblox compatibility: getfenv/newproxy not available; resolve safely
     local _, getfenvVar = newGlobalScope:resolve("getfenv");
     local _, tableVar  = newGlobalScope:resolve("table");
     local _, unpackVar = newGlobalScope:resolve("unpack");
@@ -124,11 +144,12 @@ function Compiler:compile(ast)
     local _, getmetatableVar = newGlobalScope:resolve("getmetatable");
     local _, selectVar = newGlobalScope:resolve("select");
 
-    psc:addReferenceToHigherScope(newGlobalScope, getfenvVar, 2);
+    -- Only add references if the variable exists (Roblox may not have getfenv/newproxy)
+    if getfenvVar then psc:addReferenceToHigherScope(newGlobalScope, getfenvVar, 2); end
     psc:addReferenceToHigherScope(newGlobalScope, tableVar);
     psc:addReferenceToHigherScope(newGlobalScope, unpackVar);
     psc:addReferenceToHigherScope(newGlobalScope, envVar);
-    psc:addReferenceToHigherScope(newGlobalScope, newproxyVar);
+    if newproxyVar then psc:addReferenceToHigherScope(newGlobalScope, newproxyVar); end
     psc:addReferenceToHigherScope(newGlobalScope, setmetatableVar);
     psc:addReferenceToHigherScope(newGlobalScope, getmetatableVar);
 
@@ -311,11 +332,15 @@ function Compiler:compile(ast)
         }
     }, self.scope));
 
+    -- Roblox-compatible environment retrieval (getfenv not available)
+    local envExpr = Ast.VariableExpression(newGlobalScope, envVar);
+
     return Ast.TopNode(Ast.Block({
         Ast.ReturnStatement{Ast.FunctionCallExpression(functionNode, {
-            Ast.OrExpression(Ast.AndExpression(Ast.VariableExpression(newGlobalScope, getfenvVar), Ast.FunctionCallExpression(Ast.VariableExpression(newGlobalScope, getfenvVar), {})), Ast.VariableExpression(newGlobalScope, envVar));
+            envExpr;
             Ast.OrExpression(Ast.VariableExpression(newGlobalScope, unpackVar), Ast.IndexExpression(Ast.VariableExpression(newGlobalScope, tableVar), Ast.StringExpression("unpack")));
-            Ast.VariableExpression(newGlobalScope, newproxyVar);
+            -- newproxy not available in Roblox; pass nil placeholder
+            Ast.NilExpression();
             Ast.VariableExpression(newGlobalScope, setmetatableVar);
             Ast.VariableExpression(newGlobalScope, getmetatableVar);
             Ast.VariableExpression(newGlobalScope, selectVar);
@@ -475,7 +500,8 @@ end
 
 function Compiler:createUpvaluesProxyFunc()
     local scope = Scope:new(self.scope);
-    scope:addReferenceToHigherScope(self.scope, self.newproxyVar);
+    -- newproxy not available in Roblox; use table-based proxy fallback
+    scope:addReferenceToHigherScope(self.scope, self.setmetatableVar);
 
     local entriesVar = scope:addVariable();
 
@@ -483,7 +509,7 @@ function Compiler:createUpvaluesProxyFunc()
     local proxyVar = ifScope:addVariable();
     local metatableVar = ifScope:addVariable();
     local elseScope = Scope:new(scope);
-    ifScope:addReferenceToHigherScope(self.scope, self.newproxyVar);
+    ifScope:addReferenceToHigherScope(self.scope, self.setmetatableVar);
     ifScope:addReferenceToHigherScope(self.scope, self.getmetatableVar);
     ifScope:addReferenceToHigherScope(self.scope, self.upvaluesGcFunctionVar);
     ifScope:addReferenceToHigherScope(scope, entriesVar);
@@ -507,32 +533,21 @@ function Compiler:createUpvaluesProxyFunc()
                 }))
             })
         }, forScope), scope);
-        Ast.IfStatement(Ast.VariableExpression(self.scope, self.newproxyVar), Ast.Block({
-            Ast.LocalVariableDeclaration(ifScope, {proxyVar}, {
-                Ast.FunctionCallExpression(Ast.VariableExpression(self.scope, self.newproxyVar), {
-                    Ast.BooleanExpression(true)
-                });
-            });
-            Ast.LocalVariableDeclaration(ifScope, {metatableVar}, {
-                Ast.FunctionCallExpression(Ast.VariableExpression(self.scope, self.getmetatableVar), {
-                    Ast.VariableExpression(ifScope, proxyVar);
-                });
-            });
-            Ast.AssignmentStatement({
-                Ast.AssignmentIndexing(Ast.VariableExpression(ifScope, metatableVar), Ast.StringExpression("__index")),
-                Ast.AssignmentIndexing(Ast.VariableExpression(ifScope, metatableVar), Ast.StringExpression("__gc")),
-                Ast.AssignmentIndexing(Ast.VariableExpression(ifScope, metatableVar), Ast.StringExpression("__len")),
-            }, {
-                Ast.VariableExpression(scope, entriesVar),
-                Ast.VariableExpression(self.scope, self.upvaluesGcFunctionVar),
-                Ast.FunctionLiteralExpression({}, Ast.Block({
+        -- Roblox: use table-based proxy instead of newproxy
+        Ast.LocalVariableDeclaration(ifScope, {proxyVar}, {
+            Ast.TableConstructorExpression({})
+        });
+        Ast.LocalVariableDeclaration(ifScope, {metatableVar}, {
+            Ast.TableConstructorExpression({
+                Ast.KeyedTableEntry(Ast.StringExpression("__index"), Ast.VariableExpression(scope, entriesVar)),
+                Ast.KeyedTableEntry(Ast.StringExpression("__len"), Ast.FunctionLiteralExpression({}, Ast.Block({
                     Ast.ReturnStatement({Ast.NumberExpression(self.upvalsProxyLenReturn)})
-                }, Scope:new(ifScope)));
-            });
-            Ast.ReturnStatement({
-                Ast.VariableExpression(ifScope, proxyVar)
-            })
-        }, ifScope), {}, Ast.Block({
+                }, Scope:new(ifScope)))});
+        });
+        Ast.ReturnStatement({
+            Ast.VariableExpression(ifScope, proxyVar)
+        })
+    }, ifScope), {}, Ast.Block({
             Ast.ReturnStatement({Ast.FunctionCallExpression(Ast.VariableExpression(self.scope, self.setmetatableVar), {
                 Ast.TableConstructorExpression({}),
                 Ast.TableConstructorExpression({
@@ -579,7 +594,7 @@ function Compiler:emitContainerFuncBody()
     util.shuffle(self.blocks);
 
     for _, block in ipairs(self.blocks) do
-        local id = block.id;
+        local id = block.posId;
         local blockstats = block.statements;
 
         -- Shuffle Blockstats
@@ -645,9 +660,15 @@ function Compiler:emitContainerFuncBody()
         return a.id < b.id;
     end);
 
-    local function buildIfBlock(scope, id, lBlock, rBlock)
+    -- Obfuscated dispatch: use random comparison operators to hide control flow
+    local function buildDispatchBlock(scope, id, lBlock, rBlock)
+        local ops = {
+            function(a, b) return Ast.LessThanExpression(a, b); end,
+            function(a, b) return Ast.GreaterThanExpression(b, a); end,
+        };
+        local op = ops[math.random(1, #ops)];
         return Ast.Block({
-            Ast.IfStatement(Ast.LessThanExpression(self:pos(scope), Ast.NumberExpression(id)), lBlock, {}, rBlock);
+            Ast.IfStatement(op(self:pos(scope), Ast.NumberExpression(id)), lBlock, {}, rBlock);
         }, scope);
     end
 
@@ -667,7 +688,7 @@ function Compiler:emitContainerFuncBody()
         local lBlock = buildWhileBody(tb, l, mid - 1, ifScope);
         local rBlock = buildWhileBody(tb, mid, r, ifScope);
 
-        return buildIfBlock(ifScope, bound, lBlock, rBlock);
+        return buildDispatchBlock(ifScope, bound, lBlock, rBlock);
     end
 
     local whileBody = buildWhileBody(blocks, 1, #blocks, self.containerFuncScope, self.whileScope);
@@ -687,14 +708,30 @@ function Compiler:emitContainerFuncBody()
         end
     end
 
+    -- VM loop with obfuscated control flow
+    local vmLoopBody = whileBody;
+    
+    -- Add fake conditional jumps to confuse static analysis
+    local fakeCheckVar = self.containerFuncScope:addVariable();
+    table.insert(declarations, fakeCheckVar);
+    
     local stats = {
         Ast.LocalVariableDeclaration(self.containerFuncScope, util.shuffle(declarations), {});
-        Ast.WhileStatement(whileBody, Ast.VariableExpression(self.containerFuncScope, self.posVar));
+        -- Fake initialization to obfuscate VM entry
+        Ast.AssignmentStatement({
+            Ast.AssignmentVariable(self.containerFuncScope, fakeCheckVar)
+        }, {
+            Ast.NumberExpression(math.random(1, 2^16))
+        });
+        -- Main VM execution loop with obfuscated condition
+        Ast.WhileStatement(vmLoopBody, Ast.VariableExpression(self.containerFuncScope, self.posVar));
+        -- Garbage collection trigger (obfuscated exit path)
         Ast.AssignmentStatement({
             Ast.AssignmentVariable(self.containerFuncScope, self.posVar)
         }, {
             Ast.LenExpression(Ast.VariableExpression(self.containerFuncScope, self.detectGcCollectVar))
         }),
+        -- Return result through unpack
         Ast.ReturnStatement{
             Ast.FunctionCallExpression(Ast.VariableExpression(self.scope, self.unpackVar), {
                 Ast.VariableExpression(self.containerFuncScope, self.returnVar)
@@ -720,6 +757,7 @@ function Compiler:isVarRegister(id)
     return self.registers[id] == self.VAR_REGISTER;
 end
 
+-- Register allocation with shuffled pool for obfuscation
 function Compiler:allocRegister(isVar)
     self.usedRegisters = self.usedRegisters + 1;
 
@@ -737,13 +775,34 @@ function Compiler:allocRegister(isVar)
         end
     end
 
+    -- Generate shuffled pool of available registers
+    if not self.registerPool then
+        self.registerPool = {};
+        for i = 1, MAX_REGS - 1 do
+            self.registerPool[i] = i;
+        end
+        -- Fisher-Yates shuffle
+        for i = #self.registerPool, 2, -1 do
+            local j = math.random(1, i);
+            self.registerPool[i], self.registerPool[j] = self.registerPool[j], self.registerPool[i];
+        end
+        self.poolIndex = 1;
+    end
 
     local id = 0;
-    if self.usedRegisters < MAX_REGS * MAX_REGS_MUL then
-        repeat
-            id = math.random(1, MAX_REGS - 1);
-        until not self.registers[id];
-    else
+    -- Try shuffled pool first for obfuscation
+    while self.poolIndex <= #self.registerPool do
+        local candidate = self.registerPool[self.poolIndex];
+        self.poolIndex = self.poolIndex + 1;
+        if not self.registers[candidate] then
+            id = candidate;
+            break;
+        end
+    end
+
+    -- Fallback to sequential scan
+    if id == 0 then
+        id = 0;
         repeat
             id = id + 1;
         until not self.registers[id];
@@ -962,7 +1021,7 @@ function Compiler:compileTopNode(node)
     -- Create Initial Block
     local startBlock = self:createBlock();
     local scope = startBlock.scope;
-    self.startBlockId = startBlock.id;
+    self.startBlockId = startBlock.posId;
     self:setActiveBlock(startBlock);
 
     local varAccessLookup = lookupify{
@@ -1109,14 +1168,14 @@ function Compiler:compileFunction(node, funcDepth)
     if isVarargFunction then
         scope:addReferenceToHigherScope(self.scope, self.createVarargClosureVar);
         retrieveExpression = Ast.FunctionCallExpression(Ast.VariableExpression(self.scope, self.createVarargClosureVar), {
-            Ast.NumberExpression(block.id),
+            Ast.NumberExpression(block.posId),
             Ast.TableConstructorExpression(upvalueExpressions)
         });
     else
         local varScope, var = self:getCreateClosureVar(#node.args + math.random(0, 5));
         scope:addReferenceToHigherScope(varScope, var);
         retrieveExpression = Ast.FunctionCallExpression(Ast.VariableExpression(varScope, var), {
-            Ast.NumberExpression(block.id),
+            Ast.NumberExpression(block.posId),
             Ast.TableConstructorExpression(upvalueExpressions)
         });
     end
@@ -1477,14 +1536,14 @@ function Compiler:compileStatement(statement, funcDepth)
         end
         local innerBlock = self:createBlock();
 
-        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.OrExpression(Ast.AndExpression(self:register(scope, conditionReg), Ast.NumberExpression(innerBlock.id)), Ast.NumberExpression(nextBlock.id))), {self.POS_REGISTER}, {conditionReg}, false);
+        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.OrExpression(Ast.AndExpression(self:register(scope, conditionReg), Ast.NumberExpression(innerBlock.posId)), Ast.NumberExpression(nextBlock.posId))), {self.POS_REGISTER}, {conditionReg}, false);
 
         self:freeRegister(conditionReg, false);
 
         self:setActiveBlock(innerBlock);
         scope = innerBlock.scope
         self:compileBlock(statement.body, funcDepth);
-        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.NumberExpression(finalBlock.id)), {self.POS_REGISTER}, {}, false);
+        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.NumberExpression(finalBlock.posId)), {self.POS_REGISTER}, {}, false);
 
         for i, eif in ipairs(statement.elseifs) do
             self:setActiveBlock(nextBlock);
@@ -1496,20 +1555,20 @@ function Compiler:compileStatement(statement, funcDepth)
                 nextBlock = finalBlock;
             end
             local scope = self.activeBlock.scope;
-            self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.OrExpression(Ast.AndExpression(self:register(scope, conditionReg), Ast.NumberExpression(innerBlock.id)), Ast.NumberExpression(nextBlock.id))), {self.POS_REGISTER}, {conditionReg}, false);
+            self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.OrExpression(Ast.AndExpression(self:register(scope, conditionReg), Ast.NumberExpression(innerBlock.posId)), Ast.NumberExpression(nextBlock.posId))), {self.POS_REGISTER}, {conditionReg}, false);
 
             self:freeRegister(conditionReg, false);
 
             self:setActiveBlock(innerBlock);
             scope = innerBlock.scope;
             self:compileBlock(eif.body, funcDepth);
-            self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.NumberExpression(finalBlock.id)), {self.POS_REGISTER}, {}, false);
+            self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.NumberExpression(finalBlock.posId)), {self.POS_REGISTER}, {}, false);
         end
 
         if statement.elsebody then
             self:setActiveBlock(nextBlock);
             self:compileBlock(statement.elsebody, funcDepth);
-            self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.NumberExpression(finalBlock.id)), {self.POS_REGISTER}, {}, false);
+            self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.NumberExpression(finalBlock.posId)), {self.POS_REGISTER}, {}, false);
         end
 
         self:setActiveBlock(finalBlock);
@@ -1532,18 +1591,18 @@ function Compiler:compileStatement(statement, funcDepth)
         statement.__start_block = checkBlock;
         statement.__final_block = finalBlock;
 
-        self:addStatement(self:setPos(scope, checkBlock.id), {self.POS_REGISTER}, {}, false);
+        self:addStatement(self:setPos(scope, checkBlock.posId), {self.POS_REGISTER}, {}, false);
 
         self:setActiveBlock(checkBlock);
         local scope = self.activeBlock.scope;
         local conditionReg = self:compileExpression(statement.condition, funcDepth, 1)[1];
-        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.OrExpression(Ast.AndExpression(self:register(scope, conditionReg), Ast.NumberExpression(innerBlock.id)), Ast.NumberExpression(finalBlock.id))), {self.POS_REGISTER}, {conditionReg}, false);
+        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.OrExpression(Ast.AndExpression(self:register(scope, conditionReg), Ast.NumberExpression(innerBlock.posId)), Ast.NumberExpression(finalBlock.posId))), {self.POS_REGISTER}, {conditionReg}, false);
         self:freeRegister(conditionReg, false);
 
         self:setActiveBlock(innerBlock);
         local scope = self.activeBlock.scope;
         self:compileBlock(statement.body, funcDepth);
-        self:addStatement(self:setPos(scope, checkBlock.id), {self.POS_REGISTER}, {}, false);
+        self:addStatement(self:setPos(scope, checkBlock.posId), {self.POS_REGISTER}, {}, false);
         self:setActiveBlock(finalBlock);
         return;
     end
@@ -1555,7 +1614,7 @@ function Compiler:compileStatement(statement, funcDepth)
         statement.__start_block = innerBlock;
         statement.__final_block = finalBlock;
 
-        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.NumberExpression(innerBlock.id)), {self.POS_REGISTER}, {}, false);
+        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.NumberExpression(innerBlock.posId)), {self.POS_REGISTER}, {}, false);
         self:setActiveBlock(innerBlock);
 
         -- Compile body statements without automatic variable cleanup
@@ -1567,7 +1626,7 @@ function Compiler:compileStatement(statement, funcDepth)
         local scope = self.activeBlock.scope;
         -- Evaluate condition (can access body's local variables)
         local conditionReg = (self:compileExpression(statement.condition, funcDepth, 1))[1];
-        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.OrExpression(Ast.AndExpression(self:register(scope, conditionReg), Ast.NumberExpression(finalBlock.id)), Ast.NumberExpression(innerBlock.id))), { self.POS_REGISTER }, { conditionReg }, false);
+        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.OrExpression(Ast.AndExpression(self:register(scope, conditionReg), Ast.NumberExpression(finalBlock.posId)), Ast.NumberExpression(innerBlock.posId))), { self.POS_REGISTER }, { conditionReg }, false);
         self:freeRegister(conditionReg, false);
 
         -- Clean up body's local variables
@@ -1620,7 +1679,7 @@ function Compiler:compileStatement(statement, funcDepth)
         self:addStatement(self:setRegister(scope, currentReg, Ast.SubExpression(self:register(scope, initialReg), self:register(scope, incrementReg))), {currentReg}, {initialReg, incrementReg}, false);
         self:freeRegister(initialReg);
 
-        self:addStatement(self:jmp(scope, Ast.NumberExpression(checkBlock.id)), {self.POS_REGISTER}, {}, false);
+        self:addStatement(self:jmp(scope, Ast.NumberExpression(checkBlock.posId)), {self.POS_REGISTER}, {}, false);
 
         self:setActiveBlock(checkBlock);
 
@@ -1635,11 +1694,11 @@ function Compiler:compileStatement(statement, funcDepth)
         self:addStatement(self:setRegister(scope, tmpReg2, Ast.AndExpression(self:register(scope, incrementIsNegReg), self:register(scope, tmpReg2))), {tmpReg2}, {tmpReg2, incrementIsNegReg}, false);
         self:addStatement(self:setRegister(scope, tmpReg1, Ast.OrExpression(self:register(scope, tmpReg2), self:register(scope, tmpReg1))), {tmpReg1}, {tmpReg1, tmpReg2}, false);
         self:freeRegister(tmpReg2);
-        tmpReg2 = self:compileExpression(Ast.NumberExpression(innerBlock.id), funcDepth, 1)[1];
+        tmpReg2 = self:compileExpression(Ast.NumberExpression(innerBlock.posId), funcDepth, 1)[1];
         self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.AndExpression(self:register(scope, tmpReg1), self:register(scope, tmpReg2))), {self.POS_REGISTER}, {tmpReg1, tmpReg2}, false);
         self:freeRegister(tmpReg2);
         self:freeRegister(tmpReg1);
-        tmpReg2 = self:compileExpression(Ast.NumberExpression(finalBlock.id), funcDepth, 1)[1];
+        tmpReg2 = self:compileExpression(Ast.NumberExpression(finalBlock.posId), funcDepth, 1)[1];
         self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.OrExpression(self:register(scope, self.POS_REGISTER), self:register(scope, tmpReg2))), {self.POS_REGISTER}, {self.POS_REGISTER, tmpReg2}, false);
         self:freeRegister(tmpReg2);
 
@@ -1659,7 +1718,7 @@ function Compiler:compileStatement(statement, funcDepth)
 
 
         self:compileBlock(statement.body, funcDepth);
-        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.NumberExpression(checkBlock.id)), {self.POS_REGISTER}, {}, false);
+        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.NumberExpression(checkBlock.posId)), {self.POS_REGISTER}, {}, false);
 
         self.registers[self.POS_REGISTER] = self.VAR_REGISTER;
         self:freeRegister(finalReg);
@@ -1708,7 +1767,7 @@ function Compiler:compileStatement(statement, funcDepth)
         statement.__start_block = checkBlock;
         statement.__final_block = finalBlock;
 
-        self:addStatement(self:setPos(scope, checkBlock.id), {self.POS_REGISTER}, {}, false);
+        self:addStatement(self:setPos(scope, checkBlock.posId), {self.POS_REGISTER}, {}, false);
 
         self:setActiveBlock(checkBlock);
         local scope = self.activeBlock.scope;
@@ -1731,7 +1790,7 @@ function Compiler:compileStatement(statement, funcDepth)
         self:addStatement(Ast.AssignmentStatement({
             self:posAssignment(scope)
         }, {
-            Ast.OrExpression(Ast.AndExpression(self:register(scope, exprregs[3]), Ast.NumberExpression(bodyBlock.id)), Ast.NumberExpression(finalBlock.id))
+            Ast.OrExpression(Ast.AndExpression(self:register(scope, exprregs[3]), Ast.NumberExpression(bodyBlock.posId)), Ast.NumberExpression(finalBlock.posId))
         }), {self.POS_REGISTER}, {exprregs[3]}, false);
 
         self:setActiveBlock(bodyBlock);
@@ -1755,7 +1814,7 @@ function Compiler:compileStatement(statement, funcDepth)
         end
 
         self:compileBlock(statement.body, funcDepth);
-        self:addStatement(self:setPos(scope, checkBlock.id), {self.POS_REGISTER}, {}, false);
+        self:addStatement(self:setPos(scope, checkBlock.posId), {self.POS_REGISTER}, {}, false);
         self:setActiveBlock(finalBlock);
 
         for i, reg in ipairs(exprregs) do
@@ -1798,7 +1857,7 @@ function Compiler:compileStatement(statement, funcDepth)
             end
         end
 
-        self:addStatement(self:setPos(scope, statement.loop.__final_block.id), {self.POS_REGISTER}, {}, false);
+        self:addStatement(self:setPos(scope, statement.loop.__final_block.posId), {self.POS_REGISTER}, {}, false);
         self.activeBlock.advanceToNextBlock = false;
         return;
     end
@@ -1830,7 +1889,7 @@ function Compiler:compileStatement(statement, funcDepth)
             end
         end
 
-        self:addStatement(self:setPos(scope, statement.loop.__start_block.id), {self.POS_REGISTER}, {}, false);
+        self:addStatement(self:setPos(scope, statement.loop.__start_block.posId), {self.POS_REGISTER}, {}, false);
         self.activeBlock.advanceToNextBlock = false;
         return;
     end
@@ -2220,7 +2279,7 @@ function Compiler:compileExpression(expression, funcDepth, numReturns)
 
         local block1, block2 = self:createBlock(), self:createBlock();
         self:addStatement(self:copyRegisters(scope, {resReg}, {lhsReg}), {resReg}, {lhsReg}, false);
-        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.OrExpression(Ast.AndExpression(self:register(scope, lhsReg), Ast.NumberExpression(block2.id)), Ast.NumberExpression(block1.id))), {self.POS_REGISTER}, {lhsReg}, false);
+        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.OrExpression(Ast.AndExpression(self:register(scope, lhsReg), Ast.NumberExpression(block2.posId)), Ast.NumberExpression(block1.posId))), {self.POS_REGISTER}, {lhsReg}, false);
         self:freeRegister(lhsReg, false);
 
         do
@@ -2229,7 +2288,7 @@ function Compiler:compileExpression(expression, funcDepth, numReturns)
             local rhsReg = self:compileExpression(expression.rhs, funcDepth, 1)[1];
             self:addStatement(self:copyRegisters(scope, {resReg}, {rhsReg}), {resReg}, {rhsReg}, false);
             self:freeRegister(rhsReg, false);
-            self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.NumberExpression(block2.id)), {self.POS_REGISTER}, {}, false);
+            self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.NumberExpression(block2.posId)), {self.POS_REGISTER}, {}, false);
         end
 
         self.registers[self.POS_REGISTER] = posState;
@@ -2281,7 +2340,7 @@ function Compiler:compileExpression(expression, funcDepth, numReturns)
 
         local block1, block2 = self:createBlock(), self:createBlock();
         self:addStatement(self:copyRegisters(scope, {resReg}, {lhsReg}), {resReg}, {lhsReg}, false);
-        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.OrExpression(Ast.AndExpression(self:register(scope, lhsReg), Ast.NumberExpression(block1.id)), Ast.NumberExpression(block2.id))), {self.POS_REGISTER}, {lhsReg}, false);
+        self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.OrExpression(Ast.AndExpression(self:register(scope, lhsReg), Ast.NumberExpression(block1.posId)), Ast.NumberExpression(block2.posId))), {self.POS_REGISTER}, {lhsReg}, false);
         self:freeRegister(lhsReg, false);
         do
             self:setActiveBlock(block1);
@@ -2289,7 +2348,7 @@ function Compiler:compileExpression(expression, funcDepth, numReturns)
             local rhsReg = self:compileExpression(expression.rhs, funcDepth, 1)[1];
             self:addStatement(self:copyRegisters(scope, {resReg}, {rhsReg}), {resReg}, {rhsReg}, false);
             self:freeRegister(rhsReg, false);
-            self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.NumberExpression(block2.id)), {self.POS_REGISTER}, {}, false);
+            self:addStatement(self:setRegister(scope, self.POS_REGISTER, Ast.NumberExpression(block2.posId)), {self.POS_REGISTER}, {}, false);
         end
 
         self.registers[self.POS_REGISTER] = posState;

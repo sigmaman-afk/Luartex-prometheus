@@ -1,14 +1,7 @@
--- This Script is Part of the Prometheus Obfuscator by Levno_710
---
--- parser.lua
--- Overview:
--- This Script provides a class for parsing of lua code.
--- This Parser is Capable of parsing LuaU and Lua5.1
--- 
--- Note that when parsing LuaU "continue" is treated as a Keyword, so no variable may be named "continue" even though this would be valid in LuaU
---
--- Settings Object:
--- luaVersion : The LuaVersion of the Script - Currently Supported : Lua51 and LuaU
+-- AST Parser Module
+-- Converts Lua source code into Abstract Syntax Tree
+-- Supports Lua 5.1 and LuaU syntax extensions
+-- Note: "continue" is always treated as a keyword in LuaU mode
 -- 
 
 local Tokenizer = require("prometheus.tokenizer");
@@ -943,8 +936,8 @@ function Parser:expressionLiteral(scope)
 		return Ast.VariableExpression(scope, id);
 	end
 
-	-- IfElse
-	if(LuaVersion.LuaU) then
+	-- IfElse (LuaU)
+	if(self.luaVersion == LuaVersion.LuaU) then
 		if(consume(self, TokenKind.Keyword, "if")) then
 			local condition = self:expression(scope);
 			expect(self, TokenKind.Keyword, "then");

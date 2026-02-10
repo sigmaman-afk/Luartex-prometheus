@@ -27,6 +27,7 @@ function EncryptStrings:init(settings) end
 function EncryptStrings:CreateEncrypionService()
 	local usedSeeds = {};
 
+	-- Per-build encryption keys (deterministic via math.randomseed)
 	local secret_key_6 = math.random(0, 63) -- 6-bit  arbitrary integer (0..63)
 	local secret_key_7 = math.random(0, 127) -- 7-bit  arbitrary integer (0..127)
 	local secret_key_44 = math.random(0, 17592186044415) -- 44-bit arbitrary integer (0..17592186044415)
@@ -105,9 +106,11 @@ function EncryptStrings:CreateEncrypionService()
 	end
 
     local function genCode()
+        -- Roblox-compatible version using math.ldexp for 2^x
         local code = [[
 do
 	local floor = math.floor
+	local ldexp = math.ldexp
 	local random = math.random;
 	local remove = table.remove;
 	local char = string.char;
@@ -136,8 +139,8 @@ do
 				state_8 = state_8 * ]] .. tostring(param_mul_8) .. [[ % 257
 			until state_8 ~= 1
 			local r = state_8 % 32
-			local n = floor(state_45 / 2 ^ (13 - (state_8 - r) / 32)) % 2 ^ 32 / 2 ^ r
-			local rnd = floor(n % 1 * 2 ^ 32) + floor(n)
+			local n = floor(state_45 / ldexp(1, 13 - (state_8 - r) / 32)) % ldexp(1, 32) / ldexp(1, r)
+			local rnd = floor(n % 1 * ldexp(1, 32)) + floor(n)
 			local low_16 = rnd % 65536
 			local high_16 = (rnd - low_16) / 65536
 			local b1 = low_16 % 256

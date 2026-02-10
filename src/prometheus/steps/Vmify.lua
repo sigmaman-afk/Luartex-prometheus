@@ -1,9 +1,6 @@
--- This Script is Part of the Prometheus Obfuscator by Levno_710
---
--- Vmify.lua
---
--- This Script provides a Complex Obfuscation Step that will compile the entire Script to  a fully custom bytecode that does not share it's instructions
--- with lua, making it much harder to crack than other lua obfuscators
+-- VM-based Code Protection
+-- Compiles source to custom bytecode executed by an embedded interpreter
+-- Provides stronger protection than standard obfuscation techniques
 
 local Step = require("prometheus.step");
 local Compiler = require("prometheus.compiler.compiler");

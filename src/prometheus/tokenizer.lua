@@ -1,9 +1,6 @@
--- This Script is Part of the Prometheus Obfuscator by Levno_710
---
--- tokenizer.lua
--- Overview:
--- This Script provides a class for lexical Analysis of lua code.
--- This Tokenizer is Capable of tokenizing LuaU and Lua5.1
+-- Lexical Analysis Module
+-- Handles tokenization of Lua source code for LuaU and Lua 5.1
+-- Core component of the obfuscation pipeline
 local Enums = require("prometheus.enums");
 local util = require("prometheus.util");
 local logger = require("logger");
@@ -249,6 +246,9 @@ function Tokenizer:skipComment()
 				-- Multiline Comment
 				-- Get all Chars to Closing bracket but also consider that the count of equal signs must be the same
 				while true do
+					if self.index >= self.length then
+						logger:error(generateError(self, "Unterminated multiline comment"));
+					end
 					if(self:parseAnnotation() == ']') then
 						local eqCount2 = 0;
 						while(is(self, "=")) do
@@ -451,6 +451,9 @@ function Tokenizer:multiLineString()
 			
 			local value = "";
 			while true do
+				if self.index >= self.length then
+					logger:error(generateError(self, "Unterminated multiline string"));
+				end
 				local char = get(self);
 				if(char == ']') then
 					local eqCount2 = 0;
