@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: lua-obfuscator
+    runtime: lua
+    buildCommand: ""  # No build needed for pure Lua
+    startCommand: luvit web_server.lua
+    envVars:
+      - key: LUA_PATH
+        value: "./src/?.lua;./src/?/init.lua"
