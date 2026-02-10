@@ -548,7 +548,7 @@ function Compiler:createUpvaluesProxyFunc()
         Ast.ReturnStatement({
             Ast.VariableExpression(ifScope, proxyVar)
         })
-    }, ifScope), {}, Ast.Block({
+    }, ifScope), Ast.Block({
             Ast.ReturnStatement({Ast.FunctionCallExpression(Ast.VariableExpression(self.scope, self.setmetatableVar), {
                 Ast.TableConstructorExpression({}),
                 Ast.TableConstructorExpression({
