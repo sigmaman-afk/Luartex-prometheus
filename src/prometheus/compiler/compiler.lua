@@ -270,7 +270,7 @@ function Compiler:createClosureFunction(funcNode, posId)
             Ast.FunctionCallExpression(Ast.VariableExpression(self.scope, self.containerFuncVar), {
                 Ast.VariableExpression(createClosureScope, createClosurePosArg),
                 Ast.FunctionCallExpression(Ast.VariableExpression(self.scope, self.coroutineWrapVar), {
-                    Ast.FunctionLiteralExpression(argsTb,
+                    Ast.FunctionLiteralExpression(funcNode.args,
                     Ast.Block({
                         Ast.ReturnStatement({
                             Ast.FunctionCallExpression(Ast.VariableExpression(self.scope, self.containerFuncVar), {
