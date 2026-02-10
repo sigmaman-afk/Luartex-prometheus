@@ -542,7 +542,8 @@ function Compiler:createUpvaluesProxyFunc()
                 Ast.KeyedTableEntry(Ast.StringExpression("__index"), Ast.VariableExpression(scope, entriesVar)),
                 Ast.KeyedTableEntry(Ast.StringExpression("__len"), Ast.FunctionLiteralExpression({}, Ast.Block({
                     Ast.ReturnStatement({Ast.NumberExpression(self.upvalsProxyLenReturn)})
-                }, Scope:new(ifScope)))});
+                }, Scope:new(ifScope))))
+            })
         });
         Ast.ReturnStatement({
             Ast.VariableExpression(ifScope, proxyVar)
@@ -555,7 +556,7 @@ function Compiler:createUpvaluesProxyFunc()
                     Ast.KeyedTableEntry(Ast.StringExpression("__index"), Ast.VariableExpression(scope, entriesVar)),
                     Ast.KeyedTableEntry(Ast.StringExpression("__len"), Ast.FunctionLiteralExpression({}, Ast.Block({
                         Ast.ReturnStatement({Ast.NumberExpression(self.upvalsProxyLenReturn)})
-                    }, Scope:new(ifScope)))),
+                    }, Scope:new(ifScope))))
                 })
             })})
         }, elseScope));
